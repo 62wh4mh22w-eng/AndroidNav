@@ -145,6 +145,29 @@ static NSString *an_scan_methods(const char *clsName, NSArray<NSString *> *keywo
     return [hits componentsJoinedByString:@" "];
 }
 
+#pragma mark - Inherited method dump
+
+static NSString *an_dump_hierarchy(const char *clsName) {
+    Class c = objc_getClass(clsName);
+    if (!c) return [NSString stringWithFormat:@"(no class %s)\n", clsName];
+    NSMutableArray *out = [NSMutableArray array];
+    Class cur = c;
+    int depth = 0;
+    while (cur && depth < 5) {
+        unsigned int cnt = 0;
+        Method *ms = class_copyMethodList(cur, &cnt);
+        NSMutableArray *names = [NSMutableArray array];
+        for (unsigned int i = 0; i < cnt; i++)
+            [names addObject:NSStringFromSelector(method_getName(ms[i]))];
+        free(ms);
+        [out addObject:[NSString stringWithFormat:@"--- %@ (%u) ---", NSStringFromClass(cur), cnt]];
+        if (names.count) [out addObject:[names componentsJoinedByString:@" "]];
+        cur = class_getSuperclass(cur);
+        depth++;
+    }
+    return [out componentsJoinedByString:@"\n"];
+}
+
 #pragma mark - Instance discovery
 
 // Walk every live object of a class via the ObjC runtime's reference tables.
@@ -405,17 +428,13 @@ static BOOL an_goBack(void) {
     [self an_flash:b color:[UIColor colorWithWhite:1 alpha:0.6]];
 
     NSMutableArray *log = [NSMutableArray array];
+    [log addObject:an_dump_hierarchy("SBHomeHardwareButtonActions")];
+    [log addObject:@"\n\n"];
+    [log addObject:an_dump_hierarchy("SBHardwareButtonActions")];
+    [log addObject:@"\n\n"];
+    [log addObject:an_dump_hierarchy("SBMainWorkspace")];
 
-    // Full method dump (no filtering) for the classes that matter
-    NSString *svcAll = an_scan_methods("SBHardwareButtonService", @[]);
-    NSString *actAll = an_scan_methods("SBHomeHardwareButtonActions", @[]);
-    NSString *lockAll = an_scan_methods("SBLockHardwareButtonActions", @[]);
-    NSString *wsAll = an_scan_methods("SBMainWorkspace", @[@"ome", @"witch", @"ctuat"]);
-
-    [log addObject:[NSString stringWithFormat:@"SVC: %lu chars", (unsigned long)svcAll.length]];
-    [log addObject:[NSString stringWithFormat:@"ACT: %lu chars", (unsigned long)actAll.length]];
-
-    UIView *panel = [[UIView alloc] initWithFrame:CGRectMake(0, 80, self.window.bounds.size.width, 580)];
+    UIView *panel = [[UIView alloc] initWithFrame:CGRectMake(0, 70, self.window.bounds.size.width, 600)];
     panel.backgroundColor = [UIColor colorWithWhite:0 alpha:0.96];
     panel.layer.cornerRadius = 10;
     [self.window addSubview:panel];
@@ -423,12 +442,9 @@ static BOOL an_goBack(void) {
     UITextView *tv = [[UITextView alloc] initWithFrame:CGRectMake(8, 8, panel.bounds.size.width - 16, panel.bounds.size.height - 16)];
     tv.backgroundColor = [UIColor clearColor];
     tv.textColor = [UIColor greenColor];
-    tv.font = [UIFont fontWithName:@"Menlo" size:9.5];
+    tv.font = [UIFont fontWithName:@"Menlo" size:9];
     tv.editable = NO;
-    tv.text = [NSString stringWithFormat:
-        @"=== SBHardwareButtonService ===\n%@\n\n=== SBHomeHardwareButtonActions ===\n%@\n\n=== SBMainWorkspace(home/sw) ===\n%@\n\n=== SBLockHardwareButtonActions ===\n%@\n\n(点关闭)",
-        svcAll.length ? svcAll : @"(empty)", actAll.length ? actAll : @"(empty)",
-        wsAll.length ? wsAll : @"(empty)", lockAll.length ? lockAll : @"(empty)"];
+    tv.text = [NSString stringWithFormat:@"%@\n\n(点关闭)", [log componentsJoinedByString:@"\n"]];
     [panel addSubview:tv];
 
     UITapGestureRecognizer *tap = [[UITapGestureRecognizer alloc] initWithTarget:self action:@selector(an_closePanel:)];
