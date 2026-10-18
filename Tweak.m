@@ -406,70 +406,29 @@ static BOOL an_goBack(void) {
 
     NSMutableArray *log = [NSMutableArray array];
 
-    // --- reach the hardware button service ---
-    id svc = an_call_class("SBHardwareButtonService", "sharedInstance");
-    [log addObject:[NSString stringWithFormat:@"SBHardwareButtonService: %@",
-                    svc ? NSStringFromClass([svc class]) : @"nil"]];
+    // Full method dump (no filtering) for the classes that matter
+    NSString *svcAll = an_scan_methods("SBHardwareButtonService", @[]);
+    NSString *actAll = an_scan_methods("SBHomeHardwareButtonActions", @[]);
+    NSString *lockAll = an_scan_methods("SBLockHardwareButtonActions", @[]);
+    NSString *wsAll = an_scan_methods("SBMainWorkspace", @[@"ome", @"witch", @"ctuat"]);
 
-    // dump its methods (looking for button accessors)
-    NSString *svcMethods = an_scan_methods("SBHardwareButtonService", @[]);
-    NSString *svcFiltered = svcMethods;
-
-    // --- try to obtain a home hardware button instance ---
-    id hb = nil;
-    if (svc) {
-        for (NSString *selName in @[@"homeButton", @"homeHardwareButton",
-                                    @"hardwareButtonForType:", @"buttonForType:",
-                                    @"_homeButton", @"homeButtonActions"]) {
-            SEL sl = NSSelectorFromString(selName);
-            if (![svc respondsToSelector:sl]) continue;
-            [log addObject:[NSString stringWithFormat:@"✓ svc -%@", selName]];
-            if ([selName hasSuffix:@":"]) continue;
-            id got = ((id (*)(id, SEL))[svc methodForSelector:sl])(svc, sl);
-            if (got) {
-                hb = got;
-                [log addObject:[NSString stringWithFormat:@"   -> %@", NSStringFromClass([got class])]];
-                break;
-            }
-        }
-    }
-
-    // --- if we have a button, read its buttonActions ---
-    NSString *actionsInfo = @"(no button instance)";
-    if (hb) {
-        SEL baSel = NSSelectorFromString(@"buttonActions");
-        if ([hb respondsToSelector:baSel]) {
-            id actions = ((id (*)(id, SEL))[hb methodForSelector:baSel])(hb, baSel);
-            actionsInfo = actions ? NSStringFromClass([actions class]) : @"nil";
-            if (actions) {
-                unsigned int cnt = 0;
-                Method *ms = class_copyMethodList([actions class], &cnt);
-                NSMutableArray *names = [NSMutableArray array];
-                for (unsigned int i = 0; i < cnt; i++)
-                    [names addObject:NSStringFromSelector(method_getName(ms[i]))];
-                free(ms);
-                actionsInfo = [NSString stringWithFormat:@"%@\n%@", actionsInfo,
-                               [names componentsJoinedByString:@"\n"]];
-            }
-        }
-    }
-
-    // Full method list of the actions class as a fallback reference
-    NSString *actMethods = an_scan_methods("SBHomeHardwareButtonActions", @[]);
+    [log addObject:[NSString stringWithFormat:@"SVC: %lu chars", (unsigned long)svcAll.length]];
+    [log addObject:[NSString stringWithFormat:@"ACT: %lu chars", (unsigned long)actAll.length]];
 
     UIView *panel = [[UIView alloc] initWithFrame:CGRectMake(0, 80, self.window.bounds.size.width, 580)];
-    panel.backgroundColor = [UIColor colorWithWhite:0 alpha:0.95];
+    panel.backgroundColor = [UIColor colorWithWhite:0 alpha:0.96];
     panel.layer.cornerRadius = 10;
     [self.window addSubview:panel];
 
     UITextView *tv = [[UITextView alloc] initWithFrame:CGRectMake(8, 8, panel.bounds.size.width - 16, panel.bounds.size.height - 16)];
     tv.backgroundColor = [UIColor clearColor];
     tv.textColor = [UIColor greenColor];
-    tv.font = [UIFont fontWithName:@"Menlo" size:10];
+    tv.font = [UIFont fontWithName:@"Menlo" size:9.5];
     tv.editable = NO;
     tv.text = [NSString stringWithFormat:
-        @"=== PROBE ===\n%@\n\n=== BUTTON ACTIONS ===\n%@\n\n=== ACTIONS CLASS METHODS ===\n%@\n\n(点关闭)",
-        [log componentsJoinedByString:@"\n"], actionsInfo, actMethods];
+        @"=== SBHardwareButtonService ===\n%@\n\n=== SBHomeHardwareButtonActions ===\n%@\n\n=== SBMainWorkspace(home/sw) ===\n%@\n\n=== SBLockHardwareButtonActions ===\n%@\n\n(点关闭)",
+        svcAll.length ? svcAll : @"(empty)", actAll.length ? actAll : @"(empty)",
+        wsAll.length ? wsAll : @"(empty)", lockAll.length ? lockAll : @"(empty)"];
     [panel addSubview:tv];
 
     UITapGestureRecognizer *tap = [[UITapGestureRecognizer alloc] initWithTarget:self action:@selector(an_closePanel:)];
