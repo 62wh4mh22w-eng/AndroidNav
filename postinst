@@ -1,0 +1,22 @@
+#!/bin/sh
+# AndroidNav postinst — register dylib into trustcache (RootHide/Dopamine) and respring
+
+DYLIB=/var/jb/Library/MobileSubstrate/DynamicLibraries/AndroidNav.dylib
+
+# Try every known trustcache tool location/variant, first match wins
+TC=""
+for c in /var/jb/usr/bin/trustcache /var/jb/usr/libexec/trustcache \
+         /var/jb/usr/bin/tccs /var/jb/usr/bin/jbroot/trustcache; do
+    if [ -x "$c" ]; then TC="$c"; break; fi
+done
+if [ -z "$TC" ]; then
+    TC=$(find /var/jb/usr/bin /var/jb/usr/libexec -maxdepth 2 -name "*trustcache*" -type f 2>/dev/null | head -n1)
+fi
+
+if [ -n "$TC" ] && [ -x "$TC" ]; then
+    "$TC" add "$DYLIB" 2>/dev/null || true
+fi
+
+# Respring so the tweak gets injected on next launch
+killall -9 SpringBoard 2>/dev/null || true
+exit 0

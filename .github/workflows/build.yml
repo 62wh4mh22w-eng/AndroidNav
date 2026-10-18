@@ -1,0 +1,205 @@
+name: Build AndroidNav Tweak
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Package version (e.g. 0.2.0)'
+        required: false
+        default: '0.2.0'
+
+jobs:
+  build:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set version
+        id: ver
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            echo "version=${{ github.event.inputs.version }}" >> $GITHUB_OUTPUT
+          else
+            echo "version=0.2.0-$(git rev-parse --short HEAD)" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Install ldid
+        run: brew install ldid
+
+      - name: Build dylib (arm64 + arm64e)
+        env:
+          SDK: /Applications/Xcode.app/Contents/Developer/Platforms/iPhoneOS.platform/Developer/SDKs/iPhoneOS.sdk
+        run: |
+          set -e
+          OUTDIR=build
+          mkdir -p "$OUTDIR"
+
+          # Build arm64 slice
+          clang \
+            -target arm64-apple-ios15.0 \
+            -isysroot "$SDK" \
+            -I"$SDK/usr/include" \
+            -F"$SDK/System/Library/Frameworks" \
+            -L"$SDK/usr/lib" \
+            -fobjc-arc \
+            -shared \
+            -framework UIKit -framework Foundation -framework CoreGraphics \
+            -lobjc -lSystem \
+            -install_name @loader_path/AndroidNav.dylib \
+            -o "$OUTDIR/AndroidNav.arm64.dylib" \
+            Tweak.m
+
+          echo "arm64 built:"
+          file "$OUTDIR/AndroidNav.arm64.dylib"
+
+          # Build arm64e slice
+          clang \
+            -target arm64e-apple-ios15.0 \
+            -isysroot "$SDK" \
+            -I"$SDK/usr/include" \
+            -F"$SDK/System/Library/Frameworks" \
+            -L"$SDK/usr/lib" \
+            -fobjc-arc \
+            -shared \
+            -framework UIKit -framework Foundation -framework CoreGraphics \
+            -lobjc -lSystem \
+            -install_name @loader_path/AndroidNav.dylib \
+            -o "$OUTDIR/AndroidNav.arm64e.dylib" \
+            Tweak.m
+
+          echo "arm64e built:"
+          file "$OUTDIR/AndroidNav.arm64e.dylib"
+
+          # Merge into fat binary using Apple's lipo
+          lipo -create \
+            "$OUTDIR/AndroidNav.arm64.dylib" \
+            "$OUTDIR/AndroidNav.arm64e.dylib" \
+            -output "$OUTDIR/AndroidNav.dylib"
+
+          echo "Fat binary:"
+          file "$OUTDIR/AndroidNav.dylib"
+          lipo -info "$OUTDIR/AndroidNav.dylib"
+
+      - name: Sign with ldid
+        run: |
+          ldid -S build/AndroidNav.dylib
+          echo "Signed."
+          codesign -dv build/AndroidNav.dylib 2>&1 || true
+
+      - name: Verify Mach-O structure
+        run: |
+          python3 << 'PYEOF'
+          import struct, sys
+
+          data = open("build/AndroidNav.dylib", "rb").read()
+          magic = struct.unpack("<I", data[:4])[0]
+
+          if magic == 0xBEBAFECA:  # FAT
+              nfat = struct.unpack(">I", data[4:8])[0]
+              print(f"FAT binary with {nfat} slices")
+              for i in range(nfat):
+                  off = 8 + i * 20
+                  cpu, sub, offset, size, align = struct.unpack(">IIIII", data[off:off+20])
+                  print(f"  Slice {i}: cpu={cpu:#x} subtype={sub:#x} offset={offset} size={size}")
+                  # Check arm64e subtype
+                  if cpu == 0x0100000C and sub == 0x80000002:
+                      print(f"    ✓ arm64e with correct LIB64 flag")
+                  elif cpu == 0x0100000C and sub == 0:
+                      print(f"    ✓ arm64")
+              # Read first slice for LC check
+              _, _, first_off, _, _ = struct.unpack(">IIIII", data[8:28])
+              slice_data = data[first_off:]
+          elif magic == 0xFEEDFACF:
+              print("Thin Mach-O (single slice)")
+              slice_data = data
+          else:
+              print(f"ERROR: Unknown magic {magic:#x}")
+              sys.exit(1)
+
+          # Walk load commands
+          ncmds = struct.unpack("<I", slice_data[16:20])[0]
+          sizeofcmds = struct.unpack("<I", slice_data[20:24])[0]
+          print(f"Load commands: {ncmds}, sizeofcmds: {sizeofcmds}")
+
+          has_chained = False
+          has_export_trie = False
+          has_codesig = False
+          has_reexport = False
+
+          pos = 32
+          for i in range(ncmds):
+              cmd, cmdsize = struct.unpack("<II", slice_data[pos:pos+8])
+              if cmd == 0x80000034:  # LC_DYLD_CHAINED_FIXUPS
+                  has_chained = True
+              elif cmd == 0x80000033:  # LC_DYLD_EXPORTS_TRIE
+                  has_export_trie = True
+              elif cmd == 0x1D:  # LC_CODE_SIGNATURE
+                  has_codesig = True
+              elif cmd == 0x8000001F:  # LC_REEXPORT_DYLIB
+                  has_reexport = True
+                  name_off = struct.unpack("<I", slice_data[pos+8:pos+12])[0]
+                  if name_off < cmdsize:
+                      name = slice_data[pos+name_off:pos+cmdsize].split(b'\x00')[0].decode(errors='replace')
+                      print(f"  ⚠ REEXPORT: {name}")
+                  else:
+                      print(f"  ⚠ CORRUPT REEXPORT at cmd {i} (name_off={name_off}, cmdsize={cmdsize})")
+              pos += cmdsize
+
+          print(f"CHAINED_FIXUPS: {has_chained}")
+          print(f"EXPORTS_TRIE:   {has_export_trie}")
+          print(f"CODE_SIGNATURE: {has_codesig}")
+          print(f"REEXPORT_DYLIB: {has_reexport}")
+
+          ok = True
+          if not has_codesig:
+              print("❌ Missing code signature!")
+              ok = False
+          if has_reexport:
+              print("⚠ Has REEXPORT (check if valid)")
+
+          if ok:
+              print("\n✅ All checks passed!")
+          else:
+              print("\n❌ Verification failed!")
+              sys.exit(1)
+          PYEOF
+
+      - name: Package deb
+        run: |
+          set -e
+          VERSION="${{ steps.ver.outputs.version }}"
+          PKGNAME=com.minis.androidnav
+          STAGE=build/stage
+
+          # Update version in control
+          sed -i '' "s/^Version:.*/Version: $VERSION/" control
+
+          # Create package layout — dual path for RootHide compatibility
+          mkdir -p "$STAGE/var/jb/Library/MobileSubstrate/DynamicLibraries"
+          mkdir -p "$STAGE/var/mobile/Library/MobileSubstrate/DynamicLibraries"
+          mkdir -p "$STAGE/DEBIAN"
+
+          cp build/AndroidNav.dylib "$STAGE/var/jb/Library/MobileSubstrate/DynamicLibraries/"
+          cp build/AndroidNav.dylib "$STAGE/var/mobile/Library/MobileSubstrate/DynamicLibraries/"
+          cp AndroidNav.plist "$STAGE/var/jb/Library/MobileSubstrate/DynamicLibraries/"
+          cp AndroidNav.plist "$STAGE/var/mobile/Library/MobileSubstrate/DynamicLibraries/"
+          cp control "$STAGE/DEBIAN/control"
+          cp postinst "$STAGE/DEBIAN/postinst"
+          chmod 0755 "$STAGE/DEBIAN/postinst"
+
+          # Build deb
+          dpkg-deb --root-owner-group -Zgzip -b "$STAGE" "build/${PKGNAME}_${VERSION}_iphoneos-arm64.deb"
+
+          echo "Package built:"
+          ls -la build/*.deb
+          shasum -a 256 build/*.deb
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: AndroidNav-deb
+          path: build/*.deb
+          retention-days: 90
