@@ -358,6 +358,8 @@ static BOOL an_goBack(void) {
 
     // DUMP: list real class names present in SpringBoard
     NSString *sw = an_scan_classes(@[@"Switcher", @"HomeButton", @"HomeHardware"]);
+    NSString *m1 = an_scan_methods("SBUIController", @[@"ome", @"witcher"]);
+    NSString *m2 = an_scan_methods("SBMainSwitcherViewController", @[@"witch"]);
     NSLog(@"[AndroidNav] CLASSES: %@", sw);
 
     // Show full result in an on-screen panel (sandbox blocks file writes)
@@ -379,8 +381,6 @@ static BOOL an_goBack(void) {
     UITapGestureRecognizer *tap = [[UITapGestureRecognizer alloc] initWithTarget:self action:@selector(an_closePanel:)];
     [panel addGestureRecognizer:tap];
 
-    NSString *m1 = an_scan_methods("SBUIController", @[@"ome", @"witcher"]);
-    NSString *m2 = an_scan_methods("SBMainSwitcherViewController", @[@"witch"]);
     NSString *msg = [NSString stringWithFormat:@"n=%d | %@", an_count_classes(), sw];
 
     // Also write dump to a file we can read
