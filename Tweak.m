@@ -145,6 +145,54 @@ static NSString *an_scan_methods(const char *clsName, NSArray<NSString *> *keywo
     return [hits componentsJoinedByString:@" "];
 }
 
+#pragma mark - Instance discovery
+
+// Walk every live object of a class via the ObjC runtime's reference tables.
+static BOOL an_is_live_object(id obj, const char *clsName) {
+    if (!obj) return NO;
+    Class c = objc_getClass(clsName);
+    return c ? [obj isKindOfClass:c] : NO;
+}
+
+// SBHomeHardwareButton is not a singleton -> find live instances by scanning
+// the class's weak/strong reference tables through _objc_debug helpers is not
+// public, so instead we hook object creation earlier. Simpler approach used
+// here: ask the responder chain / UIApplication for known owners.
+static id an_find_home_hardware_button(void) {
+    // Try common owners in order
+    const char *owners[] = {
+        "SBHardwareButtonManager", "SBHomeHardwareButtonActions",
+        "SBHardwareButtonService", "SBSystemGestureManager",
+        "SBHomeGestureManager", "SBMainController", NULL
+    };
+    for (int i = 0; owners[i]; i++) {
+        Class c = objc_getClass(owners[i]);
+        if (!c) continue;
+        id inst = nil;
+        if ([c respondsToSelector:NSSelectorFromString(@"sharedInstance")])
+            inst = ((id (*)(id, SEL))[c methodForSelector:NSSelectorFromString(@"sharedInstance")])(c, NSSelectorFromString(@"sharedInstance"));
+        if (inst) return inst;
+    }
+    return nil;
+}
+
+// List all classes with "HardwareButton" in the name
+static NSString *an_button_classes(void) {
+    unsigned int count = 0;
+    Class *list = objc_copyClassList(&count);
+    NSMutableArray *hits = [NSMutableArray array];
+    for (unsigned int i = 0; i < count; i++) {
+        const char *nm = class_getName(list[i]);
+        if (!nm) continue;
+        NSString *n = [NSString stringWithUTF8String:nm];
+        if ([n rangeOfString:@"HardwareButton"].location != NSNotFound &&
+            [n hasPrefix:@"SB"])
+            [hits addObject:n];
+    }
+    free(list);
+    return [hits componentsJoinedByString:@"\n"];
+}
+
 #pragma mark - Actions
 
 static BOOL an_dbg(const char *what, BOOL ok) {
@@ -358,40 +406,29 @@ static BOOL an_goBack(void) {
 
     NSMutableArray *log = [NSMutableArray array];
 
-    // Try every plausible home-button entry point and report which ones exist
-    NSArray *probe = @[
-        @[@"SBUIController", @"handleHomeButtonPress"],
-        @[@"SBUIController", @"handleHomeButtonSinglePressUp"],
-        @[@"SBUIController", @"clickedMenuButton"],
-        @[@"SBHomeHardwareButton", @"sharedInstance"],
-        @[@"SBHomeHardwareButton", @"performSinglePressAction"],
-        @[@"SBHomeHardwareButton", @"handleButtonDown"],
-        @[@"SBHomeHardwareButton", @"handleButtonUp"],
-        @[@"SBHomeHardwareButton", @"singlePressUp"],
-        @[@"AXSBHomeHardwareButtonActions", @"sharedInstance"],
-        @[@"SBActivateHomeButtonSwitcherEventResponse", @"sharedInstance"],
-        @[@"SBMainSwitcherViewController", @"sharedInstance"],
-        @[@"SBAppSwitcherController", @"sharedInstance"],
-        @[@"SBWorkspace", @"sharedInstance"],
-        @[@"SBHomeGestureSettings", @"sharedInstance"],
-    ];
-
-    for (NSArray *pair in probe) {
-        NSString *cls = pair[0];
-        NSString *sel = pair[1];
-        Class c = objc_getClass(cls.UTF8String);
-        if (!c) { [log addObject:[NSString stringWithFormat:@"✗ %@ (no class)", cls]]; continue; }
-        SEL sl = NSSelectorFromString(sel);
-        if (![c respondsToSelector:sl]) { [log addObject:[NSString stringWithFormat:@"✗ +%@ %@", cls, sel]]; continue; }
-        [log addObject:[NSString stringWithFormat:@"✓ +%@ %@", cls, sel]];
+    // 1) manager objects that may own the hardware button
+    NSArray *owners = @[@"SBHardwareButtonManager", @"SBHardwareButtonService",
+                        @"SBSystemGestureManager", @"SBHomeGestureManager",
+                        @"SBMainController", @"SBMainWorkspace"];
+    for (NSString *o in owners) {
+        Class c = objc_getClass(o.UTF8String);
+        if (!c) { [log addObject:[NSString stringWithFormat:@"✗ %@ (no class)", o]]; continue; }
+        SEL si = NSSelectorFromString(@"sharedInstance");
+        if ([c respondsToSelector:si]) {
+            [log addObject:[NSString stringWithFormat:@"✓ %@ sharedInstance", o]];
+        } else {
+            [log addObject:[NSString stringWithFormat:@"~ %@ exists, no sharedInstance", o]];
+        }
     }
 
-    // Dump methods of the two most promising classes
-    NSString *mHB = an_scan_methods("SBHomeHardwareButton", @[@"ress", @"utton", @"ction", @"ome"]);
-    NSString *mAX = an_scan_methods("AXSBHomeHardwareButtonActions", @[@"ress", @"utton", @"ction", @"ome"]);
+    // 2) every SB*HardwareButton* class
+    NSString *bc = an_button_classes();
 
-    UIView *panel = [[UIView alloc] initWithFrame:CGRectMake(0, 100, self.window.bounds.size.width, 520)];
-    panel.backgroundColor = [UIColor colorWithWhite:0 alpha:0.94];
+    // 3) methods on the actions class
+    NSString *mAct = an_scan_methods("SBHomeHardwareButtonActions", @[@"ress", @"utton", @"ction", @"ome", @"witcher"]);
+
+    UIView *panel = [[UIView alloc] initWithFrame:CGRectMake(0, 90, self.window.bounds.size.width, 560)];
+    panel.backgroundColor = [UIColor colorWithWhite:0 alpha:0.95];
     panel.layer.cornerRadius = 10;
     [self.window addSubview:panel];
 
@@ -401,8 +438,8 @@ static BOOL an_goBack(void) {
     tv.font = [UIFont fontWithName:@"Menlo" size:10.5];
     tv.editable = NO;
     tv.text = [NSString stringWithFormat:
-        @"=== PROBE ===\n%@\n\n=== SBHomeHardwareButton ===\n%@\n\n=== AXSBHomeHardwareButtonActions ===\n%@\n\n(点关闭)",
-        [log componentsJoinedByString:@"\n"], mHB, mAX];
+        @"=== OWNERS ===\n%@\n\n=== HW BUTTON CLASSES ===\n%@\n\n=== ACTIONS METHODS ===\n%@\n\n(点关闭)",
+        [log componentsJoinedByString:@"\n"], bc, mAct];
     [panel addSubview:tv];
 
     UITapGestureRecognizer *tap = [[UITapGestureRecognizer alloc] initWithTarget:self action:@selector(an_closePanel:)];
