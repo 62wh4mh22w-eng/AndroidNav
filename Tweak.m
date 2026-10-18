@@ -357,9 +357,10 @@ static BOOL an_goBack(void) {
     [self an_flash:b color:[UIColor colorWithWhite:1 alpha:0.6]];
 
     // DUMP: list real class names present in SpringBoard
-    NSString *sw = an_scan_classes(@[@"Switcher", @"HomeButton", @"HomeHardware"]);
-    NSString *m1 = an_scan_methods("SBUIController", @[@"ome", @"witcher"]);
-    NSString *m2 = an_scan_methods("SBMainSwitcherViewController", @[@"witch"]);
+    NSString *sw = an_scan_classes(@[@"MainSwitcher", @"AppSwitcherController", @"HomeHardwareButton", @"HomeButton", @"SBHomeGesture"]);
+    NSString *m1 = an_scan_methods("SBUIController", @[@"ome", @"witch", @"enu", @"Lock"]);
+    NSString *m2 = an_scan_methods("SBHomeHardwareButton", @[@"ress", @"ction", @"utton"]);
+    NSString *m3 = an_scan_methods("SBWorkspace", @[@"ome", @"witch"]);
     NSLog(@"[AndroidNav] CLASSES: %@", sw);
 
     // Show full result in an on-screen panel (sandbox blocks file writes)
@@ -374,8 +375,8 @@ static BOOL an_goBack(void) {
     tv.textColor = [UIColor greenColor];
     tv.font = [UIFont fontWithName:@"Menlo" size:11];
     tv.editable = NO;
-    tv.text = [NSString stringWithFormat:@"=== SWITCHER/HOME CLASSES ===\n%@\n\n=== SBUIController ===\n%@\n\n=== SBMainSwitcherViewController ===\n%@\n\n(双击面板关闭)",
-               sw, m1, m2];
+    tv.text = [NSString stringWithFormat:@"=== CLASSES ===\n%@\n\n=== SBUIController ===\n%@\n\n=== SBHomeHardwareButton ===\n%@\n\n=== SBWorkspace ===\n%@\n\n(点面板关闭)",
+               sw, m1, m2, m3];
     [panel addSubview:tv];
 
     UITapGestureRecognizer *tap = [[UITapGestureRecognizer alloc] initWithTarget:self action:@selector(an_closePanel:)];
