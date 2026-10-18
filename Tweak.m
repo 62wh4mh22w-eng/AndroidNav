@@ -1,9 +1,6 @@
 // AndroidNav — Android-style virtual navigation bar for iOS 15/16 SpringBoard
-// v0.3.0: robust actions using multiple private-API fallbacks.
-//   Home     -> SBUIController / SBHomeHardwareButton / SBMainWorkspace ...
-//   Recents  -> SBMainSwitcherViewController / SBWorkspace ...
-//   Back     -> best-effort: goBack action, nav pop, modal dismiss, keyboard dismiss
-// Pure Objective-C, no Theos/Logos/Substrate headers required.
+// v0.5.0: touch pass-through window + IOHIDEvent hardware-key simulation
+//         (most reliable way to trigger Home / App Switcher on iOS 16)
 
 #import <UIKit/UIKit.h>
 #import <objc/runtime.h>
@@ -37,72 +34,93 @@ static BOOL an_send(id obj, const char *selName) {
     return YES;
 }
 
+#pragma mark - Hardware key simulation (IOHIDEvent)
+
+// Types from IOHIDEvent / SpringBoardServices
+typedef struct __IOHIDEvent *IOHIDEventRef;
+typedef struct __IOHIDEventSystemClient *IOHIDEventSystemClientRef;
+
+static IOHIDEventRef (*s_createKbEvent)(CFAllocatorRef, uint32_t, uint32_t, uint32_t, uint32_t, int32_t);
+static void (*s_sendEvent)(IOHIDEventSystemClientRef, IOHIDEventRef, int);
+static IOHIDEventSystemClientRef (*s_clientCreate)(CFAllocatorRef);
+static void (*s_setDispatch)(IOHIDEventSystemClientRef, dispatch_queue_t);
+static void (*s_setService)(IOHIDEventSystemClientRef, uint32_t);
+
+static void an_load_hid(void) {
+    if (s_createKbEvent) return;
+    void *h = dlopen("/usr/lib/libIOHID.dylib", RTLD_NOW);
+    if (!h) h = dlopen("/System/Library/Frameworks/IOKit.framework/IOKit", RTLD_NOW);
+    if (!h) return;
+    s_createKbEvent = dlsym(h, "IOHIDEventCreateKeyboardEvent");
+    s_sendEvent = dlsym(h, "IOHIDEventSystemClientDispatchEvent");
+    s_clientCreate = dlsym(h, "IOHIDEventSystemClientCreate");
+    s_setDispatch = dlsym(h, "IOHIDEventSystemClientSetDispatchQueue");
+    s_setService = dlsym(h, "IOHIDEventSystemClientSetService");
+}
+
+static void an_post_key(uint32_t usage) {
+    an_load_hid();
+    if (!s_createKbEvent || !s_sendEvent || !s_clientCreate) {
+        NSLog(@"[AndroidNav] IOHID unavailable");
+        return;
+    }
+    static IOHIDEventSystemClientRef client = NULL;
+    if (!client) {
+        client = s_clientCreate(kCFAllocatorDefault);
+        if (s_setDispatch) s_setDispatch(client, dispatch_get_main_queue());
+        if (s_setService) s_setService(client, 1); // kIOHIDEventSystemClientServiceTypeAppleVendor
+    }
+    IOHIDEventRef down = s_createKbEvent(kCFAllocatorDefault, 0, usage, 1, 0, 0);
+    IOHIDEventRef up = s_createKbEvent(kCFAllocatorDefault, 0, usage, 0, 0, 0);
+    if (down) { s_sendEvent(client, down, 0); CFRelease(down); }
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.03 * NSEC_PER_SEC)),
+                   dispatch_get_main_queue(), ^{
+        if (up) { s_sendEvent(client, up, 0); CFRelease(up); }
+    });
+    NSLog(@"[AndroidNav] posted HID usage 0x%X", usage);
+}
+
+// HID usage codes
+#define HID_USAGE_HOME      0x40  // Keyboard Home
+#define HID_USAGE_APP_SWITCH 0x68 // Keyboard power/power key variant used by springboard
+
 #pragma mark - Actions
 
-// ---- HOME ----
 static BOOL an_goHome(void) {
-    // 1) SBUIController (classic, still present on iOS 15/16)
+    // 1) Hardware Home key via IOHID (most reliable)
+    an_post_key(HID_USAGE_HOME);
+
+    // 2) Private API fallbacks
     id uic = an_call_class("SBUIController", "sharedInstance");
     if (an_send(uic, "handleHomeButtonPress")) return YES;
     if (an_send(uic, "handleHomeButtonSinglePressUp")) return YES;
-    if (an_send(uic, "clickedMenuButton")) return YES;
 
-    // 2) SBHomeHardwareButton / _SBHomeHardwareButton
-    const char *hbClasses[] = {
-        "SBHomeHardwareButton", "_SBHomeHardwareButton",
-        "SBHomeHardwareButtonGestureRecognizer", NULL
-    };
-    for (int i = 0; hbClasses[i]; i++) {
-        Class c = objc_getClass(hbClasses[i]);
-        if (!c) continue;
-        id inst = nil;
-        if ([c respondsToSelector:@selector(sharedInstance)])
-            inst = ((id (*)(id, SEL))[c methodForSelector:@selector(sharedInstance)])(c, @selector(sharedInstance));
-        if (!inst && [c respondsToSelector:@selector(sharedInstanceIfExists)])
-            inst = ((id (*)(id, SEL))[c methodForSelector:@selector(sharedInstanceIfExists)])(c, @selector(sharedInstanceIfExists));
-        if (inst && (an_send(inst, "handleButtonDown") || an_send(inst, "handleButtonUp") ||
-                     an_send(inst, "performActionsForButtonDown") || an_send(inst, "singlePressUp")))
-            return YES;
-    }
-
-    // 3) SBMainWorkspace
     id workspace = an_call_class("SBMainWorkspace", "sharedInstance");
     if (an_send(workspace, "handleHomeButtonPress")) return YES;
 
     return NO;
 }
 
-// ---- RECENTS (app switcher) ----
 static BOOL an_openRecents(void) {
-    // 1) SBMainSwitcherViewController
+    // 1) Two rapid Home presses = app switcher gesture
+    an_post_key(HID_USAGE_HOME);
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.18 * NSEC_PER_SEC)),
+                   dispatch_get_main_queue(), ^{ an_post_key(HID_USAGE_HOME); });
+
+    // 2) Direct switcher APIs
     id switcher = an_call_class("SBMainSwitcherViewController", "sharedInstance");
     if (!switcher) switcher = an_call_class("SBMainSwitcherViewController", "sharedInstanceIfExists");
     if (an_send(switcher, "toggleSwitcher")) return YES;
-    if (an_send(switcher, "beginPresentationOrDismissalIfNecessary")) return YES;
     if (an_send(switcher, "presentSwitcher")) return YES;
-
-    // 2) SBWorkspace / SBMainWorkspace transitions
-    id workspace = an_call_class("SBMainWorkspace", "sharedInstance");
-    if (an_send(workspace, "toggleSwitcher")) return YES;
-    if (an_send(workspace, "showAppSwitcher")) return YES;
-
-    // 3) SBUIController fallback
-    id uic = an_call_class("SBUIController", "sharedInstance");
-    if (an_send(uic, "toggleSwitcher")) return YES;
-    if (an_send(uic, "handleSwitcherButtonPress")) return YES;
 
     return NO;
 }
 
-// ---- BACK ----
 static BOOL an_goBack(void) {
     UIApplication *app = [UIApplication sharedApplication];
     if (!app) return NO;
 
-    // 1) High-level goBack action (works in many system apps)
-    if ([app respondsToSelector:NSSelectorFromString(@"sendAction:to:from:forEvent:")]) {
-        [app sendAction:NSSelectorFromString(@"goBack") to:nil from:nil forEvent:nil];
-    }
+    [app sendAction:NSSelectorFromString(@"goBack") to:nil from:nil forEvent:nil];
 
     UIWindow *keyWindow = nil;
     for (UIWindow *w in [app windows]) {
@@ -114,7 +132,6 @@ static BOOL an_goBack(void) {
     if (keyWindow && [keyWindow respondsToSelector:@selector(rootViewController)])
         root = [keyWindow rootViewController];
 
-    // 2) Dismiss any presented view controller (modal / alert / sheet)
     UIViewController *top = root;
     while (top.presentedViewController) top = top.presentedViewController;
     if (top && top != root) {
@@ -122,7 +139,6 @@ static BOOL an_goBack(void) {
         return YES;
     }
 
-    // 3) Pop navigation stack (all levels)
     if ([root isKindOfClass:[UINavigationController class]]) {
         UINavigationController *nav = (UINavigationController *)root;
         if (nav.viewControllers.count > 1) {
@@ -130,20 +146,17 @@ static BOOL an_goBack(void) {
             return YES;
         }
     }
-    // search for nav controller in presented stack
     if ([top isKindOfClass:[UINavigationController class]]) {
         UINavigationController *nav = (UINavigationController *)top;
         if (nav.viewControllers.count > 1) { [nav popViewControllerAnimated:YES]; return YES; }
     }
 
-    // 4) Dismiss the keyboard
     [keyWindow endEditing:YES];
 
-    // 5) SpringBoard-level back: SBBackButton / SBGesture
-    id sbBack = an_call_class("SBBackButton", "sharedInstance");
-    if (an_send(sbBack, "performBack")) return YES;
-
-    return NO;
+    // Hardware Back isn't standard on iOS; simulate the "swipe back" fallback
+    // by sending Escape which many apps handle
+    an_post_key(0x29);
+    return YES;
 }
 
 #pragma mark - Bar view
@@ -183,58 +196,33 @@ static BOOL an_goBack(void) {
         [btn setTitleColor:[UIColor whiteColor] forState:UIControlStateNormal];
         btn.titleLabel.font = [UIFont systemFontOfSize:22 weight:UIFontWeightMedium];
         btn.tag = i;
+        // Fire on touch-down for immediate response (Android-like)
         SEL sel = i == 0 ? @selector(an_backTapped:) : (i == 1 ? @selector(an_homeTapped:) : @selector(an_recentsTapped:));
-        [btn addTarget:self action:sel forControlEvents:UIControlEventTouchUpInside];
+        [btn addTarget:self action:sel forControlEvents:UIControlEventTouchDown];
         [self addSubview:btn];
-    }
-}
-
-- (void)an_haptic {
-    if (@available(iOS 10.0, *)) {
-        UIImpactFeedbackGenerator *gen = [[UIImpactFeedbackGenerator alloc] initWithStyle:UIImpactFeedbackStyleLight];
-        [gen prepare];
-        [gen impactOccurred];
     }
 }
 
 - (void)an_flash:(UIButton *)b color:(UIColor *)c {
     UIColor *orig = b.backgroundColor;
     b.backgroundColor = c;
-    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.25 * NSEC_PER_SEC)),
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.2 * NSEC_PER_SEC)),
                    dispatch_get_main_queue(), ^{ b.backgroundColor = orig; });
 }
 
-- (void)an_backTapped:(UIButton *)sender {
-    [self an_haptic];
-    [self an_flash:sender color:[UIColor colorWithWhite:1 alpha:0.55]];
-    BOOL ok = an_goBack();
-    NSLog(@"[AndroidNav] TAP back -> %@", ok ? @"OK" : @"NO-OP");
+- (void)an_backTapped:(UIButton *)b {
+    [self an_flash:b color:[UIColor colorWithWhite:1 alpha:0.6]];
+    an_goBack();
 }
 
-- (void)an_homeTapped:(UIButton *)sender {
-    [self an_haptic];
-    [self an_flash:sender color:[UIColor colorWithWhite:1 alpha:0.55]];
-    BOOL ok = an_goHome();
-    NSLog(@"[AndroidNav] TAP home -> %@", ok ? @"OK" : @"NO-OP");
+- (void)an_homeTapped:(UIButton *)b {
+    [self an_flash:b color:[UIColor colorWithWhite:1 alpha:0.6]];
+    an_goHome();
 }
 
-- (void)an_recentsTapped:(UIButton *)sender {
-    [self an_haptic];
-    [self an_flash:sender color:[UIColor colorWithWhite:1 alpha:0.55]];
-    BOOL ok = an_openRecents();
-    NSLog(@"[AndroidNav] TAP recents -> %@", ok ? @"OK" : @"NO-OP");
-}
-
-- (UIView *)hitTest:(CGPoint)point withEvent:(UIEvent *)event {
-    UIView *v = [super hitTest:point withEvent:event];
-    NSLog(@"[AndroidNav] hitTest point=(%.0f,%.0f) -> %@", point.x, point.y,
-          v ? NSStringFromClass([v class]) : @"nil");
-    return v;
-}
-
-- (void)touchesBegan:(NSSet<UITouch *> *)touches withEvent:(UIEvent *)event {
-    NSLog(@"[AndroidNav] touchesBegan on bar (%lu touches)", (unsigned long)touches.count);
-    [super touchesBegan:touches withEvent:event];
+- (void)an_recentsTapped:(UIButton *)b {
+    [self an_flash:b color:[UIColor colorWithWhite:1 alpha:0.6]];
+    an_openRecents();
 }
 
 - (void)layoutSubviews {
@@ -252,22 +240,60 @@ static BOOL an_goBack(void) {
 
 @end
 
+#pragma mark - Root controller (touch pass-through)
+
+// The root view only accepts touches inside the nav bar rect. Returning nil
+// from hitTest lets SpringBoard's own windows get every other touch.
+@interface ANavRootVC : UIViewController
+@end
+
+@implementation ANavRootVC
+
+- (void)loadView {
+    self.view = [[UIView alloc] initWithFrame:[[UIScreen mainScreen] bounds]];
+    self.view.backgroundColor = [UIColor clearColor];
+    self.view.userInteractionEnabled = YES;
+}
+
+- (UIView *)hitTestForPoint:(CGPoint)pt withEvent:(UIEvent *)e {
+    if (!gNavBar) return nil;
+    if (CGRectContainsPoint(gNavBar.frame, pt)) return [gNavBar hitTest:pt withEvent:e];
+    return nil;
+}
+
+@end
+
+// Custom window: overrides hitTest so only the bar area swallows touches.
+@interface ANavWindow : UIWindow
+@property (nonatomic, weak) ANavRootVC *navVC;
+@end
+
+@implementation ANavWindow
+
+- (UIView *)hitTest:(CGPoint)point withEvent:(UIEvent *)event {
+    if (!gNavBar) return nil;
+    if (CGRectContainsPoint(gNavBar.frame, point)) {
+        UIView *v = [gNavBar hitTest:point withEvent:event];
+        return v;
+    }
+    return nil; // pass everything else to SpringBoard below
+}
+
+@end
+
 #pragma mark - Attach logic
 
 static void an_attachBar(void) {
     if (![NSThread isMainThread]) return;
-    if (gNavWindow && gNavBar.superview == gNavWindow) return;
+    if (gNavWindow && gNavBar && gNavBar.superview) return;
 
     CGRect screen = [[UIScreen mainScreen] bounds];
 
     if (!gNavWindow) {
-        // iOS 13+: attach to the foreground-active window scene so touches work
         UIWindowScene *scene = nil;
         for (UIScene *sc in [[UIApplication sharedApplication] connectedScenes]) {
-            if ([sc isKindOfClass:[UIWindowScene class]] &&
-                sc.activationState == UISceneActivationStateForegroundActive) {
-                scene = (UIWindowScene *)sc; break;
-            }
+            if (![sc isKindOfClass:[UIWindowScene class]]) continue;
+            if (sc.activationState == UISceneActivationStateForegroundActive) { scene = (UIWindowScene *)sc; break; }
         }
         if (!scene) {
             for (UIScene *sc in [[UIApplication sharedApplication] connectedScenes]) {
@@ -276,21 +302,19 @@ static void an_attachBar(void) {
         }
         if (scene) {
             if (@available(iOS 13.0, *)) {
-                gNavWindow = [[UIWindow alloc] initWithWindowScene:scene];
+                gNavWindow = [[ANavWindow alloc] initWithWindowScene:scene];
                 gNavWindow.frame = screen;
             }
         }
-        if (!gNavWindow) gNavWindow = [[UIWindow alloc] initWithFrame:screen];
-        // Above status bar / alerts, below system alerts
+        if (!gNavWindow) gNavWindow = [[ANavWindow alloc] initWithFrame:screen];
+
         gNavWindow.windowLevel = UIWindowLevelStatusBar + 100.0;
         gNavWindow.backgroundColor = [UIColor clearColor];
-        gNavWindow.hidden = NO;
         gNavWindow.userInteractionEnabled = YES;
-
-        UIViewController *vc = [[UIViewController alloc] init];
-        vc.view.backgroundColor = [UIColor clearColor];
-        vc.view.userInteractionEnabled = YES;
-        gNavWindow.rootViewController = vc;
+        ((ANavWindow *)gNavWindow).navVC = [[ANavRootVC alloc] init];
+        gNavWindow.rootViewController = ((ANavWindow *)gNavWindow).navVC;
+        gNavWindow.hidden = NO;
+        // NOTE: never call makeKeyAndVisible — that steals every touch.
     }
 
     if (!gNavBar) {
@@ -298,30 +322,16 @@ static void an_attachBar(void) {
         gNavBar = [[ANavBarView alloc] initWithFrame:frame];
     }
 
-    UIViewController *vc = gNavWindow.rootViewController;
-    gNavBar.frame = CGRectMake(0, vc.view.bounds.size.height - gBarHeight,
-                               vc.view.bounds.size.width, gBarHeight);
+    gNavBar.frame = CGRectMake(0, screen.size.height - gBarHeight, screen.size.width, gBarHeight);
     gNavBar.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleTopMargin;
 
-    if (gNavBar.superview != vc.view) {
+    UIView *host = gNavWindow.rootViewController.view;
+    if (gNavBar.superview != host) {
         [gNavBar removeFromSuperview];
-        [vc.view addSubview:gNavBar];
+        [host addSubview:gNavBar];
     }
-
     gNavWindow.hidden = NO;
-    [gNavWindow makeKeyAndVisible];
-    // keep key window sane: makeKeyAndVisible steals key status; restore after
-    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.15 * NSEC_PER_SEC)),
-                   dispatch_get_main_queue(), ^{
-        UIWindow *best = nil; CGFloat bestArea = 0;
-        for (UIWindow *w in [[UIApplication sharedApplication] windows]) {
-            if (w == gNavWindow) continue;
-            CGFloat a = w.bounds.size.width * w.bounds.size.height;
-            if (a > bestArea) { bestArea = a; best = w; }
-        }
-        if (best) [best makeKeyWindow];
-    });
-    NSLog(@"[AndroidNav] bar attached as its own window (level=%.0f)", gNavWindow.windowLevel);
+    NSLog(@"[AndroidNav] bar attached, level=%.0f", gNavWindow.windowLevel);
 }
 
 #pragma mark - Hook
