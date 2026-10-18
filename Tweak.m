@@ -87,38 +87,86 @@ static void an_post_key(uint32_t usage) {
 
 #pragma mark - Actions
 
+static BOOL an_dbg(const char *what, BOOL ok) {
+    NSLog(@"[AndroidNav] %s -> %@", what, ok ? @"OK" : @"NO");
+    return ok;
+}
+
+// Call a class method returning id, with one id argument
+static id an_cls_call1(const char *cls, const char *sel, id a1) {
+    Class c = objc_getClass(cls);
+    if (!c) return nil;
+    SEL s = sel_registerName(sel);
+    if (![c respondsToSelector:s]) return nil;
+    id (*f)(id, SEL, id) = (id (*)(id, SEL, id))[c methodForSelector:s];
+    return f((id)c, s, a1);
+}
+
+// ---- HOME ----
+// Strategy A: SBUIController (works on many iOS 15/16 jailbreaks)
+// Strategy B: SBHomeHardwareButtonActions via SBHomeHardwareButton
+// Strategy C: ask SpringBoard to go to home screen through SBWorkspace
 static BOOL an_goHome(void) {
-    // 1) Hardware Home key via IOHID (most reliable)
-    an_post_key(HID_USAGE_HOME);
-    if (s_sendEvent) return YES;
-
-    // 2) Private API fallbacks
+    // A
     id uic = an_call_class("SBUIController", "sharedInstance");
-    if (an_send(uic, "handleHomeButtonPress")) return YES;
-    if (an_send(uic, "handleHomeButtonSinglePressUp")) return YES;
+    if (an_send(uic, "handleHomeButtonPress")) return an_dbg("home/UIController", YES);
+    if (an_send(uic, "handleHomeButtonSinglePressUp")) return an_dbg("home/UIController-up", YES);
 
-    id workspace = an_call_class("SBMainWorkspace", "sharedInstance");
-    if (an_send(workspace, "handleHomeButtonPress")) return YES;
+    // B: SBHomeHardwareButtonActions
+    id hb = an_call_class("SBHomeHardwareButton", "sharedInstance");
+    if (!hb) hb = an_call_class("_SBHomeHardwareButton", "sharedInstance");
+    if (hb) {
+        if (an_send(hb, "performSinglePressAction")) return an_dbg("home/HW-actions", YES);
+        if (an_send(hb, "handleButtonDown")) return an_dbg("home/HW-down", YES);
+        if (an_send(hb, "handleButtonUp")) return an_dbg("home/HW-up", YES);
+    }
 
-    return NO;
-}
+    // C: SBMainWorkspace
+    id ws = an_call_class("SBMainWorkspace", "sharedInstance");
+    if (an_send(ws, "handleHomeButtonPress")) return an_dbg("home/workspace", YES);
 
-static BOOL an_openRecents(void) {
-    // 1) Two rapid Home presses = app switcher gesture
+    // D: SBApplicationController — dismiss foreground app
+    id appCtrl = an_call_class("SBApplicationController", "sharedInstance");
+    if (an_send(appCtrl, "handleHomeButtonPress")) return an_dbg("home/appctrl", YES);
+
+    // E: last resort — IOHID (no-op in many jailbreaks but harmless)
     an_post_key(HID_USAGE_HOME);
-    if (s_sendEvent) return YES;
-    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.18 * NSEC_PER_SEC)),
-                   dispatch_get_main_queue(), ^{ an_post_key(HID_USAGE_HOME); });
-
-    // 2) Direct switcher APIs
-    id switcher = an_call_class("SBMainSwitcherViewController", "sharedInstance");
-    if (!switcher) switcher = an_call_class("SBMainSwitcherViewController", "sharedInstanceIfExists");
-    if (an_send(switcher, "toggleSwitcher")) return YES;
-    if (an_send(switcher, "presentSwitcher")) return YES;
-
-    return NO;
+    return an_dbg("home/IOHID-only", NO);
 }
 
+// ---- RECENTS ----
+static BOOL an_openRecents(void) {
+    // A: SBMainSwitcherViewController
+    id sw = an_call_class("SBMainSwitcherViewController", "sharedInstance");
+    if (!sw) sw = an_call_class("SBMainSwitcherViewController", "sharedInstanceIfExists");
+    if (an_send(sw, "toggleSwitcher")) return an_dbg("recents/switcher", YES);
+    if (an_send(sw, "presentSwitcher")) return an_dbg("recents/present", YES);
+    if (an_send(sw, "beginPresentationOrDismissalIfNecessary")) return an_dbg("recents/begin", YES);
+
+    // B: SBAppSwitcherController
+    id asc = an_call_class("SBAppSwitcherController", "sharedInstance");
+    if (an_send(asc, "handleSwitcherButtonPress")) return an_dbg("recents/ASC", YES);
+    if (an_send(asc, "toggleSwitcher")) return an_dbg("recents/ASC-toggle", YES);
+
+    // C: SBUIController
+    id uic = an_call_class("SBUIController", "sharedInstance");
+    if (an_send(uic, "toggleSwitcher")) return an_dbg("recents/UIC", YES);
+    if (an_send(uic, "handleSwitcherButtonPress")) return an_dbg("recents/UIC-btn", YES);
+    if (an_send(uic, "clickedMenuButton")) return an_dbg("recents/UIC-menu", YES);
+
+    // D: SBMainWorkspace
+    id ws = an_call_class("SBMainWorkspace", "sharedInstance");
+    if (an_send(ws, "toggleSwitcher")) return an_dbg("recents/workspace", YES);
+
+    an_post_key(HID_USAGE_HOME);
+    return an_dbg("recents/IOHID-only", NO);
+}
+
+// ---- BACK ----
+// Global back isn't an iOS concept; do the best generic thing:
+// 1) send the goBack action (App-level)
+// 2) dismiss modals / pop nav stacks in the frontmost app window
+// 3) ask SpringBoard's app-return stack to step back
 static BOOL an_goBack(void) {
     UIApplication *app = [UIApplication sharedApplication];
     if (!app) return NO;
@@ -126,10 +174,12 @@ static BOOL an_goBack(void) {
     [app sendAction:NSSelectorFromString(@"goBack") to:nil from:nil forEvent:nil];
 
     UIWindow *keyWindow = nil;
+    CGFloat bestArea = 0;
     for (UIWindow *w in [app windows]) {
-        if ([w isKeyWindow]) { keyWindow = w; break; }
+        if (w.hidden) continue;
+        CGFloat a = w.bounds.size.width * w.bounds.size.height;
+        if (a > bestArea) { bestArea = a; keyWindow = w; }
     }
-    if (!keyWindow && [app windows].count) keyWindow = [app windows][0];
 
     UIViewController *root = nil;
     if (keyWindow && [keyWindow respondsToSelector:@selector(rootViewController)])
@@ -139,27 +189,26 @@ static BOOL an_goBack(void) {
     while (top.presentedViewController) top = top.presentedViewController;
     if (top && top != root) {
         [top dismissViewControllerAnimated:YES completion:nil];
-        return YES;
+        return an_dbg("back/dismiss", YES);
     }
 
-    if ([root isKindOfClass:[UINavigationController class]]) {
-        UINavigationController *nav = (UINavigationController *)root;
+    for (UIViewController *vc in @[top ?: [NSNull null], root ?: [NSNull null]]) {
+        if (![vc isKindOfClass:[UINavigationController class]]) continue;
+        UINavigationController *nav = (UINavigationController *)vc;
         if (nav.viewControllers.count > 1) {
             [nav popViewControllerAnimated:YES];
-            return YES;
+            return an_dbg("back/pop", YES);
         }
     }
-    if ([top isKindOfClass:[UINavigationController class]]) {
-        UINavigationController *nav = (UINavigationController *)top;
-        if (nav.viewControllers.count > 1) { [nav popViewControllerAnimated:YES]; return YES; }
+
+    if ([top isKindOfClass:[UITabBarController class]]) {
+        UITabBarController *tb = (UITabBarController *)top;
+        if (tb.selectedIndex > 0) { tb.selectedIndex -= 1; return an_dbg("back/tab", YES); }
     }
 
     [keyWindow endEditing:YES];
-
-    // Hardware Back isn't standard on iOS; simulate the "swipe back" fallback
-    // by sending Escape which many apps handle
-    an_post_key(0x29);
-    return YES;
+    an_post_key(0x29); // Escape
+    return an_dbg("back/escape", NO);
 }
 
 #pragma mark - Bar view
