@@ -1,26 +1,12 @@
-// AndroidNav — Android-style virtual navigation bar for iOS 16 SpringBoard
-// v0.0.2: attach bar to SpringBoard's existing main window (new UIWindow doesn't show
-// on iOS 16 SB). DIAG build: red background to verify injection + UI path.
+// AndroidNav — Android-style virtual navigation bar for iOS 15/16 SpringBoard
+// v0.3.0: robust actions using multiple private-API fallbacks.
+//   Home     -> SBUIController / SBHomeHardwareButton / SBMainWorkspace ...
+//   Recents  -> SBMainSwitcherViewController / SBWorkspace ...
+//   Back     -> best-effort: goBack action, nav pop, modal dismiss, keyboard dismiss
 // Pure Objective-C, no Theos/Logos/Substrate headers required.
 
 #import <UIKit/UIKit.h>
 #import <objc/runtime.h>
-
-#pragma mark - Forward declarations
-
-@interface SBUIController : NSObject
-+ (instancetype)sharedInstance;
-- (void)clickedMenuButton;
-- (void)handleHomeButtonPress;
-- (void)handleHomeButtonSinglePressUp;
-@end
-
-@interface SBMainSwitcherViewController : NSObject
-+ (instancetype)sharedInstanceIfExists;
-+ (instancetype)sharedInstance;
-- (void)toggleSwitcher;
-- (void)beginPresentationOrDismissalIfNecessary;
-@end
 
 #pragma mark - Globals
 
@@ -28,58 +14,135 @@ static UIView *gNavBar = nil;
 static CGFloat gBarHeight = 54.0;
 #define ANDROIDNAV_DIAG 1
 
-#pragma mark - Helpers
+#pragma mark - Runtime helpers
 
-static void an_goHome(void) {
-    Class cls = NSClassFromString(@"SBUIController");
-    if (!cls) return;
-    id controller = [cls sharedInstance];
-    if (!controller) return;
-    if ([controller respondsToSelector:@selector(handleHomeButtonPress)]) {
-        [controller handleHomeButtonPress];
-    } else if ([controller respondsToSelector:@selector(clickedMenuButton)]) {
-        [controller clickedMenuButton];
-    } else if ([controller respondsToSelector:@selector(handleHomeButtonSinglePressUp)]) {
-        [controller handleHomeButtonSinglePressUp];
-    }
+static id an_call_class(const char *clsName, const char *selName) {
+    Class c = objc_getClass(clsName);
+    if (!c) return nil;
+    SEL s = sel_registerName(selName);
+    if (![c respondsToSelector:s]) return nil;
+    IMP imp = [c methodForSelector:s];
+    if (!imp) return nil;
+    return ((id (*)(id, SEL))imp)(c, s);
 }
 
-static void an_openRecents(void) {
-    Class cls = NSClassFromString(@"SBMainSwitcherViewController");
-    if (!cls) return;
-    id switcher = nil;
-    if ([cls respondsToSelector:@selector(sharedInstance)]) {
-        switcher = [cls sharedInstance];
-    } else if ([cls respondsToSelector:@selector(sharedInstanceIfExists)]) {
-        switcher = [cls sharedInstanceIfExists];
-    }
-    if (!switcher) return;
-    if ([switcher respondsToSelector:@selector(toggleSwitcher)]) {
-        [switcher toggleSwitcher];
-    } else if ([switcher respondsToSelector:@selector(beginPresentationOrDismissalIfNecessary)]) {
-        [switcher beginPresentationOrDismissalIfNecessary];
-    }
+static BOOL an_send(id obj, const char *selName) {
+    if (!obj) return NO;
+    SEL s = sel_registerName(selName);
+    if (![obj respondsToSelector:s]) return NO;
+    IMP imp = [obj methodForSelector:s];
+    if (!imp) return NO;
+    ((void (*)(id, SEL))imp)(obj, s);
+    return YES;
 }
 
-static void an_goBack(void) {
+#pragma mark - Actions
+
+// ---- HOME ----
+static BOOL an_goHome(void) {
+    // 1) SBUIController (classic, still present on iOS 15/16)
+    id uic = an_call_class("SBUIController", "sharedInstance");
+    if (an_send(uic, "handleHomeButtonPress")) return YES;
+    if (an_send(uic, "handleHomeButtonSinglePressUp")) return YES;
+    if (an_send(uic, "clickedMenuButton")) return YES;
+
+    // 2) SBHomeHardwareButton / _SBHomeHardwareButton
+    const char *hbClasses[] = {
+        "SBHomeHardwareButton", "_SBHomeHardwareButton",
+        "SBHomeHardwareButtonGestureRecognizer", NULL
+    };
+    for (int i = 0; hbClasses[i]; i++) {
+        Class c = objc_getClass(hbClasses[i]);
+        if (!c) continue;
+        id inst = nil;
+        if ([c respondsToSelector:@selector(sharedInstance)])
+            inst = ((id (*)(id, SEL))[c methodForSelector:@selector(sharedInstance)])(c, @selector(sharedInstance));
+        if (!inst && [c respondsToSelector:@selector(sharedInstanceIfExists)])
+            inst = ((id (*)(id, SEL))[c methodForSelector:@selector(sharedInstanceIfExists)])(c, @selector(sharedInstanceIfExists));
+        if (inst && (an_send(inst, "handleButtonDown") || an_send(inst, "handleButtonUp") ||
+                     an_send(inst, "performActionsForButtonDown") || an_send(inst, "singlePressUp")))
+            return YES;
+    }
+
+    // 3) SBMainWorkspace
+    id workspace = an_call_class("SBMainWorkspace", "sharedInstance");
+    if (an_send(workspace, "handleHomeButtonPress")) return YES;
+
+    return NO;
+}
+
+// ---- RECENTS (app switcher) ----
+static BOOL an_openRecents(void) {
+    // 1) SBMainSwitcherViewController
+    id switcher = an_call_class("SBMainSwitcherViewController", "sharedInstance");
+    if (!switcher) switcher = an_call_class("SBMainSwitcherViewController", "sharedInstanceIfExists");
+    if (an_send(switcher, "toggleSwitcher")) return YES;
+    if (an_send(switcher, "beginPresentationOrDismissalIfNecessary")) return YES;
+    if (an_send(switcher, "presentSwitcher")) return YES;
+
+    // 2) SBWorkspace / SBMainWorkspace transitions
+    id workspace = an_call_class("SBMainWorkspace", "sharedInstance");
+    if (an_send(workspace, "toggleSwitcher")) return YES;
+    if (an_send(workspace, "showAppSwitcher")) return YES;
+
+    // 3) SBUIController fallback
+    id uic = an_call_class("SBUIController", "sharedInstance");
+    if (an_send(uic, "toggleSwitcher")) return YES;
+    if (an_send(uic, "handleSwitcherButtonPress")) return YES;
+
+    return NO;
+}
+
+// ---- BACK ----
+static BOOL an_goBack(void) {
     UIApplication *app = [UIApplication sharedApplication];
-    if (!app) return;
+    if (!app) return NO;
 
-    [app sendAction:@selector(goBack) to:nil from:nil forEvent:nil];
+    // 1) High-level goBack action (works in many system apps)
+    if ([app respondsToSelector:NSSelectorFromString(@"sendAction:to:from:forEvent:")]) {
+        [app sendAction:NSSelectorFromString(@"goBack") to:nil from:nil forEvent:nil];
+    }
 
     UIWindow *keyWindow = nil;
     for (UIWindow *w in [app windows]) {
         if ([w isKeyWindow]) { keyWindow = w; break; }
     }
     if (!keyWindow && [app windows].count) keyWindow = [app windows][0];
-    if (keyWindow && [keyWindow respondsToSelector:@selector(rootViewController)]) {
-        UIViewController *root = [keyWindow rootViewController];
-        if ([root isKindOfClass:[UINavigationController class]]) {
-            [(UINavigationController *)root popViewControllerAnimated:YES];
-        } else if (root.presentedViewController) {
-            [root.presentedViewController dismissViewControllerAnimated:YES completion:nil];
+
+    UIViewController *root = nil;
+    if (keyWindow && [keyWindow respondsToSelector:@selector(rootViewController)])
+        root = [keyWindow rootViewController];
+
+    // 2) Dismiss any presented view controller (modal / alert / sheet)
+    UIViewController *top = root;
+    while (top.presentedViewController) top = top.presentedViewController;
+    if (top && top != root) {
+        [top dismissViewControllerAnimated:YES completion:nil];
+        return YES;
+    }
+
+    // 3) Pop navigation stack (all levels)
+    if ([root isKindOfClass:[UINavigationController class]]) {
+        UINavigationController *nav = (UINavigationController *)root;
+        if (nav.viewControllers.count > 1) {
+            [nav popViewControllerAnimated:YES];
+            return YES;
         }
     }
+    // search for nav controller in presented stack
+    if ([top isKindOfClass:[UINavigationController class]]) {
+        UINavigationController *nav = (UINavigationController *)top;
+        if (nav.viewControllers.count > 1) { [nav popViewControllerAnimated:YES]; return YES; }
+    }
+
+    // 4) Dismiss the keyboard
+    [keyWindow endEditing:YES];
+
+    // 5) SpringBoard-level back: SBBackButton / SBGesture
+    id sbBack = an_call_class("SBBackButton", "sharedInstance");
+    if (an_send(sbBack, "performBack")) return YES;
+
+    return NO;
 }
 
 #pragma mark - Bar view
@@ -125,7 +188,7 @@ static void an_goBack(void) {
     }
 }
 
-- (void)an_touchDown:(UIButton *)sender {
+- (void)an_haptic {
     if (@available(iOS 10.0, *)) {
         UIImpactFeedbackGenerator *gen = [[UIImpactFeedbackGenerator alloc] initWithStyle:UIImpactFeedbackStyleLight];
         [gen prepare];
@@ -133,9 +196,9 @@ static void an_goBack(void) {
     }
 }
 
-- (void)an_backTapped:(UIButton *)sender   { an_goBack(); }
-- (void)an_homeTapped:(UIButton *)sender   { an_goHome(); }
-- (void)an_recentsTapped:(UIButton *)sender { an_openRecents(); }
+- (void)an_backTapped:(UIButton *)sender    { [self an_haptic]; BOOL ok = an_goBack(); NSLog(@"[AndroidNav] back -> %@", ok ? @"OK" : @"NO-OP"); }
+- (void)an_homeTapped:(UIButton *)sender    { [self an_haptic]; BOOL ok = an_goHome(); NSLog(@"[AndroidNav] home -> %@", ok ? @"OK" : @"NO-OP"); }
+- (void)an_recentsTapped:(UIButton *)sender { [self an_haptic]; BOOL ok = an_openRecents(); NSLog(@"[AndroidNav] recents -> %@", ok ? @"OK" : @"NO-OP"); }
 
 - (void)layoutSubviews {
     [super layoutSubviews];
@@ -154,7 +217,6 @@ static void an_goBack(void) {
 
 #pragma mark - Attach logic
 
-// Pick SpringBoard's biggest visible window (its main home screen window).
 static UIWindow *an_springBoardMainWindow(void) {
     UIApplication *app = [UIApplication sharedApplication];
     if (!app) return nil;
@@ -169,27 +231,26 @@ static UIWindow *an_springBoardMainWindow(void) {
     return best;
 }
 
-static void an_attachBar(void) {
-    if (gNavBar && gNavBar.superview) return; // already attached
-    if ([NSThread isMainThread]) {
-        UIWindow *win = an_springBoardMainWindow();
-        if (!win) return;
-        if (!gNavBar) {
-            CGRect screen = [[UIScreen mainScreen] bounds];
-            CGRect frame = CGRectMake(0, screen.size.height - gBarHeight, screen.size.width, gBarHeight);
-            gNavBar = [[ANavBarView alloc] initWithFrame:frame];
-        }
-        gNavBar.frame = CGRectMake(0, win.bounds.size.height - gBarHeight, win.bounds.size.width, gBarHeight);
-        gNavBar.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleTopMargin;
-        [win addSubview:gNavBar];
-        [win bringSubviewToFront:gNavBar];
-        gNavBar.hidden = NO;
-    }
+static UIColor *an_barColor(void) {
+    return [UIColor colorWithRed:0.85 green:0.1 blue:0.1 alpha:0.85];
 }
 
-static void an_attachOnMain(void) {
+static void an_attachBar(void) {
     if (gNavBar && gNavBar.superview) return;
-    dispatch_async(dispatch_get_main_queue(), ^{ an_attachBar(); });
+    if (![NSThread isMainThread]) return;
+    UIWindow *win = an_springBoardMainWindow();
+    if (!win) return;
+    if (!gNavBar) {
+        CGRect screen = [[UIScreen mainScreen] bounds];
+        CGRect frame = CGRectMake(0, screen.size.height - gBarHeight, screen.size.width, gBarHeight);
+        gNavBar = [[ANavBarView alloc] initWithFrame:frame];
+    }
+    gNavBar.frame = CGRectMake(0, win.bounds.size.height - gBarHeight, win.bounds.size.width, gBarHeight);
+    gNavBar.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleTopMargin;
+    [win addSubview:gNavBar];
+    [win bringSubviewToFront:gNavBar];
+    gNavBar.hidden = NO;
+    NSLog(@"[AndroidNav] bar attached to window %@", win);
 }
 
 #pragma mark - Hook
@@ -198,7 +259,7 @@ static void (*orig_appDidFinishLaunching)(id, SEL, id) = NULL;
 
 static void hooked_appDidFinishLaunching(id self, SEL _cmd, id arg1) {
     orig_appDidFinishLaunching(self, _cmd, arg1);
-    an_attachOnMain();
+    dispatch_async(dispatch_get_main_queue(), ^{ an_attachBar(); });
 }
 
 static void __attribute__((constructor)) an_init(void) {
@@ -216,7 +277,6 @@ static void __attribute__((constructor)) an_init(void) {
             }
         }
 
-        // Fallback: tweak loaded after launch, or hook point missing.
         dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(2 * NSEC_PER_SEC)),
                        dispatch_get_main_queue(), ^{ an_attachBar(); });
         dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(8 * NSEC_PER_SEC)),
