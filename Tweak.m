@@ -85,6 +85,66 @@ static void an_post_key(uint32_t usage) {
 #define HID_USAGE_HOME      0x40  // Keyboard Home
 #define HID_USAGE_APP_SWITCH 0x68 // Keyboard power/power key variant used by springboard
 
+#pragma mark - Class / selector discovery
+
+static int an_count_classes(void) {
+    int n = 0;
+    unsigned int count = 0;
+    objc_copyClassNamesForImage ? (void)0 : (void)0;
+    Class *list = objc_copyClassList(&count);
+    if (list) n = (int)count;
+    free(list);
+    return n;
+}
+
+// List class names in this process matching any of the keywords
+static NSString *an_scan_classes(NSArray<NSString *> *keywords) {
+    unsigned int count = 0;
+    Class *list = objc_copyClassList(&count);
+    NSMutableArray *hits = [NSMutableArray array];
+    for (unsigned int i = 0; i < count; i++) {
+        const char *nm = class_getName(list[i]);
+        if (!nm) continue;
+        NSString *name = [NSString stringWithUTF8String:nm];
+        for (NSString *k in keywords) {
+            if ([name rangeOfString:k].location != NSNotFound) {
+                [hits addObject:name];
+                break;
+            }
+        }
+    }
+    free(list);
+    return [hits componentsJoinedByString:@","];
+}
+
+static NSString *an_scan_methods(const char *clsName, NSArray<NSString *> *keywords) {
+    Class c = objc_getClass(clsName);
+    if (!c) return [NSString stringWithFormat:@"(no class %s)", clsName];
+    unsigned int count = 0;
+    Method *ms = class_copyMethodList(object_getClass(c), &count); // class methods
+    NSMutableArray *hits = [NSMutableArray array];
+    for (unsigned int i = 0; i < count; i++) {
+        NSString *n = NSStringFromSelector(method_getName(ms[i]));
+        for (NSString *k in keywords) {
+            if ([n rangeOfString:k].location != NSNotFound) { [hits addObject:[@"+" stringByAppendingString:n]]; break; }
+        }
+    }
+    free(ms);
+    Class meta = object_getClass(c);
+    (void)meta;
+
+    count = 0;
+    ms = class_copyMethodList(c, &count);
+    for (unsigned int i = 0; i < count; i++) {
+        NSString *n = NSStringFromSelector(method_getName(ms[i]));
+        for (NSString *k in keywords) {
+            if ([n rangeOfString:k].location != NSNotFound) { [hits addObject:[@"-" stringByAppendingString:n]]; break; }
+        }
+    }
+    free(ms);
+    return [hits componentsJoinedByString:@" "];
+}
+
 #pragma mark - Actions
 
 static BOOL an_dbg(const char *what, BOOL ok) {
@@ -295,9 +355,24 @@ static BOOL an_goBack(void) {
 
 - (void)an_recentsTapped:(UIButton *)b {
     [self an_flash:b color:[UIColor colorWithWhite:1 alpha:0.6]];
-    NSString *r = an_openRecents() ? @"recents OK" : @"recents FAIL";
-    [self an_status:r];
-    NSLog(@"[AndroidNav] TAP %@", r);
+
+    // DUMP: list real class names present in SpringBoard
+    NSString *sw = an_scan_classes(@[@"Switcher", @"HomeButton", @"HomeHardware"]);
+    NSLog(@"[AndroidNav] CLASSES: %@", sw);
+
+    NSString *m1 = an_scan_methods("SBUIController", @[@"ome", @"witcher"]);
+    NSString *m2 = an_scan_methods("SBMainSwitcherViewController", @[@"witch"]);
+    NSString *msg = [NSString stringWithFormat:@"n=%d | %@", an_count_classes(), sw];
+
+    // Also write dump to a file we can read
+    NSString *path = @"/var/mobile/Documents/androidnav_dump.txt";
+    NSString *dump = [NSString stringWithFormat:
+        @"classes(total=%d)\n%@\n\nSBUIController:\n%@\n\nSBMainSwitcherViewController:\n%@\n",
+        an_count_classes(), sw, m1, m2];
+    [dump writeToFile:path atomically:YES encoding:NSUTF8StringEncoding error:nil];
+
+    [self an_status:msg];
+    NSLog(@"[AndroidNav] %@", dump);
 }
 
 - (void)layoutSubviews {
