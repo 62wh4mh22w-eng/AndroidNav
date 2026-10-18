@@ -356,43 +356,57 @@ static BOOL an_goBack(void) {
 - (void)an_recentsTapped:(UIButton *)b {
     [self an_flash:b color:[UIColor colorWithWhite:1 alpha:0.6]];
 
-    // DUMP: list real class names present in SpringBoard
-    NSString *sw = an_scan_classes(@[@"MainSwitcher", @"AppSwitcherController", @"HomeHardwareButton", @"HomeButton", @"SBHomeGesture"]);
-    NSString *m1 = an_scan_methods("SBUIController", @[@"ome", @"witch", @"enu", @"Lock"]);
-    NSString *m2 = an_scan_methods("SBHomeHardwareButton", @[@"ress", @"ction", @"utton"]);
-    NSString *m3 = an_scan_methods("SBWorkspace", @[@"ome", @"witch"]);
-    NSLog(@"[AndroidNav] CLASSES: %@", sw);
+    NSMutableArray *log = [NSMutableArray array];
 
-    // Show full result in an on-screen panel (sandbox blocks file writes)
-    UIView *panel = [[UIView alloc] initWithFrame:CGRectMake(0, 120, self.window.bounds.size.width, 420)];
-    panel.backgroundColor = [UIColor colorWithWhite:0 alpha:0.92];
+    // Try every plausible home-button entry point and report which ones exist
+    NSArray *probe = @[
+        @[@"SBUIController", @"handleHomeButtonPress"],
+        @[@"SBUIController", @"handleHomeButtonSinglePressUp"],
+        @[@"SBUIController", @"clickedMenuButton"],
+        @[@"SBHomeHardwareButton", @"sharedInstance"],
+        @[@"SBHomeHardwareButton", @"performSinglePressAction"],
+        @[@"SBHomeHardwareButton", @"handleButtonDown"],
+        @[@"SBHomeHardwareButton", @"handleButtonUp"],
+        @[@"SBHomeHardwareButton", @"singlePressUp"],
+        @[@"AXSBHomeHardwareButtonActions", @"sharedInstance"],
+        @[@"SBActivateHomeButtonSwitcherEventResponse", @"sharedInstance"],
+        @[@"SBMainSwitcherViewController", @"sharedInstance"],
+        @[@"SBAppSwitcherController", @"sharedInstance"],
+        @[@"SBWorkspace", @"sharedInstance"],
+        @[@"SBHomeGestureSettings", @"sharedInstance"],
+    ];
+
+    for (NSArray *pair in probe) {
+        NSString *cls = pair[0];
+        NSString *sel = pair[1];
+        Class c = objc_getClass(cls.UTF8String);
+        if (!c) { [log addObject:[NSString stringWithFormat:@"✗ %@ (no class)", cls]]; continue; }
+        SEL sl = NSSelectorFromString(sel);
+        if (![c respondsToSelector:sl]) { [log addObject:[NSString stringWithFormat:@"✗ +%@ %@", cls, sel]]; continue; }
+        [log addObject:[NSString stringWithFormat:@"✓ +%@ %@", cls, sel]];
+    }
+
+    // Dump methods of the two most promising classes
+    NSString *mHB = an_scan_methods("SBHomeHardwareButton", @[@"ress", @"utton", @"ction", @"ome"]);
+    NSString *mAX = an_scan_methods("AXSBHomeHardwareButtonActions", @[@"ress", @"utton", @"ction", @"ome"]);
+
+    UIView *panel = [[UIView alloc] initWithFrame:CGRectMake(0, 100, self.window.bounds.size.width, 520)];
+    panel.backgroundColor = [UIColor colorWithWhite:0 alpha:0.94];
     panel.layer.cornerRadius = 10;
-    panel.tag = 4242;
     [self.window addSubview:panel];
 
     UITextView *tv = [[UITextView alloc] initWithFrame:CGRectMake(8, 8, panel.bounds.size.width - 16, panel.bounds.size.height - 16)];
     tv.backgroundColor = [UIColor clearColor];
     tv.textColor = [UIColor greenColor];
-    tv.font = [UIFont fontWithName:@"Menlo" size:11];
+    tv.font = [UIFont fontWithName:@"Menlo" size:10.5];
     tv.editable = NO;
-    tv.text = [NSString stringWithFormat:@"=== CLASSES ===\n%@\n\n=== SBUIController ===\n%@\n\n=== SBHomeHardwareButton ===\n%@\n\n=== SBWorkspace ===\n%@\n\n(点面板关闭)",
-               sw, m1, m2, m3];
+    tv.text = [NSString stringWithFormat:
+        @"=== PROBE ===\n%@\n\n=== SBHomeHardwareButton ===\n%@\n\n=== AXSBHomeHardwareButtonActions ===\n%@\n\n(点关闭)",
+        [log componentsJoinedByString:@"\n"], mHB, mAX];
     [panel addSubview:tv];
 
     UITapGestureRecognizer *tap = [[UITapGestureRecognizer alloc] initWithTarget:self action:@selector(an_closePanel:)];
     [panel addGestureRecognizer:tap];
-
-    NSString *msg = [NSString stringWithFormat:@"n=%d | %@", an_count_classes(), sw];
-
-    // Also write dump to a file we can read
-    NSString *path = @"/var/mobile/Documents/androidnav_dump.txt";
-    NSString *dump = [NSString stringWithFormat:
-        @"classes(total=%d)\n%@\n\nSBUIController:\n%@\n\nSBMainSwitcherViewController:\n%@\n",
-        an_count_classes(), sw, m1, m2];
-    [dump writeToFile:path atomically:YES encoding:NSUTF8StringEncoding error:nil];
-
-    [self an_status:msg];
-    NSLog(@"[AndroidNav] %@", dump);
 }
 
 - (void)an_closePanel:(UITapGestureRecognizer *)g {
