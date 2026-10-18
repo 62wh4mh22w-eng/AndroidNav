@@ -26,8 +26,16 @@ jobs:
             echo "version=0.2.0-$(git rev-parse --short HEAD)" >> $GITHUB_OUTPUT
           fi
 
-      - name: Install ldid
-        run: brew install ldid
+      - name: Install build tools
+        run: |
+          brew install ldid
+          brew install dpkg
+          # dpkg formula may not put dpkg-deb on PATH; locate it
+          if ! command -v dpkg-deb >/dev/null 2>&1; then
+            DPKG_PREFIX="$(brew --prefix dpkg 2>/dev/null || echo /opt/homebrew/opt/dpkg)"
+            echo "$DPKG_PREFIX/bin" >> "$GITHUB_PATH"
+          fi
+          echo "dpkg-deb path:"; command -v dpkg-deb || true
 
       - name: Build dylib (arm64 + arm64e)
         env:
@@ -191,7 +199,12 @@ jobs:
           chmod 0755 "$STAGE/DEBIAN/postinst"
 
           # Build deb
-          dpkg-deb --root-owner-group -Zgzip -b "$STAGE" "build/${PKGNAME}_${VERSION}_iphoneos-arm64.deb"
+          if command -v dpkg-deb >/dev/null 2>&1; then
+            DEB_TOOL=dpkg-deb
+          else
+            DEB_TOOL="$(brew --prefix dpkg)/bin/dpkg-deb"
+          fi
+          "$DEB_TOOL" --root-owner-group -Zgzip -b "$STAGE" "build/${PKGNAME}_${VERSION}_iphoneos-arm64.deb"
 
           echo "Package built:"
           ls -la build/*.deb
