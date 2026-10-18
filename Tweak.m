@@ -241,43 +241,22 @@ static BOOL an_goBack(void) {
 
 @end
 
-#pragma mark - Root controller (touch pass-through)
+#pragma mark - Touch pass-through window
 
-// The root view only accepts touches inside the nav bar rect. Returning nil
-// from hitTest lets SpringBoard's own windows get every other touch.
-@interface ANavRootVC : UIViewController
-@end
-
-@implementation ANavRootVC
-
-- (void)loadView {
-    self.view = [[UIView alloc] initWithFrame:[[UIScreen mainScreen] bounds]];
-    self.view.backgroundColor = [UIColor clearColor];
-    self.view.userInteractionEnabled = YES;
-}
-
-- (UIView *)hitTestForPoint:(CGPoint)pt withEvent:(UIEvent *)e {
-    if (!gNavBar) return nil;
-    if (CGRectContainsPoint(gNavBar.frame, pt)) return [gNavBar hitTest:pt withEvent:e];
-    return nil;
-}
-
-@end
-
-// Custom window: overrides hitTest so only the bar area swallows touches.
+// Window that only swallows touches inside the nav bar rect.
 @interface ANavWindow : UIWindow
-@property (nonatomic, weak) ANavRootVC *navVC;
 @end
 
 @implementation ANavWindow
 
 - (UIView *)hitTest:(CGPoint)point withEvent:(UIEvent *)event {
     if (!gNavBar) return nil;
-    if (CGRectContainsPoint(gNavBar.frame, point)) {
-        UIView *v = [gNavBar hitTest:point withEvent:event];
-        return v;
+    CGRect f = gNavBar.frame;
+    if (CGRectContainsPoint(f, point)) {
+        CGPoint local = [gNavBar convertPoint:point fromView:self];
+        return [gNavBar hitTest:local withEvent:event];
     }
-    return nil; // pass everything else to SpringBoard below
+    return nil; // everything else goes to SpringBoard
 }
 
 @end
@@ -304,35 +283,35 @@ static void an_attachBar(void) {
         if (scene) {
             if (@available(iOS 13.0, *)) {
                 gNavWindow = [[ANavWindow alloc] initWithWindowScene:scene];
-                gNavWindow.frame = screen;
             }
         }
         if (!gNavWindow) gNavWindow = [[ANavWindow alloc] initWithFrame:screen];
 
+        gNavWindow.frame = screen;
         gNavWindow.windowLevel = UIWindowLevelStatusBar + 100.0;
         gNavWindow.backgroundColor = [UIColor clearColor];
         gNavWindow.userInteractionEnabled = YES;
-        ((ANavWindow *)gNavWindow).navVC = [[ANavRootVC alloc] init];
-        gNavWindow.rootViewController = ((ANavWindow *)gNavWindow).navVC;
+        gNavWindow.rootViewController = [[UIViewController alloc] init];
+        gNavWindow.rootViewController.view.backgroundColor = [UIColor clearColor];
         gNavWindow.hidden = NO;
-        // NOTE: never call makeKeyAndVisible — that steals every touch.
+        // never makeKeyAndVisible — it steals all touches
     }
 
+    // Bar sits in window coordinates, bottom of screen.
     if (!gNavBar) {
         CGRect frame = CGRectMake(0, screen.size.height - gBarHeight, screen.size.width, gBarHeight);
         gNavBar = [[ANavBarView alloc] initWithFrame:frame];
     }
-
     gNavBar.frame = CGRectMake(0, screen.size.height - gBarHeight, screen.size.width, gBarHeight);
     gNavBar.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleTopMargin;
 
-    UIView *host = gNavWindow.rootViewController.view;
-    if (gNavBar.superview != host) {
+    if (gNavBar.superview != gNavWindow) {
         [gNavBar removeFromSuperview];
-        [host addSubview:gNavBar];
+        [gNavWindow addSubview:gNavBar];
     }
     gNavWindow.hidden = NO;
-    NSLog(@"[AndroidNav] bar attached, level=%.0f", gNavWindow.windowLevel);
+    [gNavWindow bringSubviewToFront:gNavBar];
+    NSLog(@"[AndroidNav] bar attached frame=%@", NSStringFromCGRect(gNavBar.frame));
 }
 
 #pragma mark - Hook
