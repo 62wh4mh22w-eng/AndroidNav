@@ -10,6 +10,7 @@
 
 #pragma mark - Globals
 
+static UIWindow *gNavWindow = nil;
 static UIView *gNavBar = nil;
 static CGFloat gBarHeight = 54.0;
 #define ANDROIDNAV_DIAG 1
@@ -196,9 +197,45 @@ static BOOL an_goBack(void) {
     }
 }
 
-- (void)an_backTapped:(UIButton *)sender    { [self an_haptic]; BOOL ok = an_goBack(); NSLog(@"[AndroidNav] back -> %@", ok ? @"OK" : @"NO-OP"); }
-- (void)an_homeTapped:(UIButton *)sender    { [self an_haptic]; BOOL ok = an_goHome(); NSLog(@"[AndroidNav] home -> %@", ok ? @"OK" : @"NO-OP"); }
-- (void)an_recentsTapped:(UIButton *)sender { [self an_haptic]; BOOL ok = an_openRecents(); NSLog(@"[AndroidNav] recents -> %@", ok ? @"OK" : @"NO-OP"); }
+- (void)an_flash:(UIButton *)b color:(UIColor *)c {
+    UIColor *orig = b.backgroundColor;
+    b.backgroundColor = c;
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.25 * NSEC_PER_SEC)),
+                   dispatch_get_main_queue(), ^{ b.backgroundColor = orig; });
+}
+
+- (void)an_backTapped:(UIButton *)sender {
+    [self an_haptic];
+    [self an_flash:sender color:[UIColor colorWithWhite:1 alpha:0.55]];
+    BOOL ok = an_goBack();
+    NSLog(@"[AndroidNav] TAP back -> %@", ok ? @"OK" : @"NO-OP");
+}
+
+- (void)an_homeTapped:(UIButton *)sender {
+    [self an_haptic];
+    [self an_flash:sender color:[UIColor colorWithWhite:1 alpha:0.55]];
+    BOOL ok = an_goHome();
+    NSLog(@"[AndroidNav] TAP home -> %@", ok ? @"OK" : @"NO-OP");
+}
+
+- (void)an_recentsTapped:(UIButton *)sender {
+    [self an_haptic];
+    [self an_flash:sender color:[UIColor colorWithWhite:1 alpha:0.55]];
+    BOOL ok = an_openRecents();
+    NSLog(@"[AndroidNav] TAP recents -> %@", ok ? @"OK" : @"NO-OP");
+}
+
+- (UIView *)hitTest:(CGPoint)point withEvent:(UIEvent *)event {
+    UIView *v = [super hitTest:point withEvent:event];
+    NSLog(@"[AndroidNav] hitTest point=(%.0f,%.0f) -> %@", point.x, point.y,
+          v ? NSStringFromClass([v class]) : @"nil");
+    return v;
+}
+
+- (void)touchesBegan:(NSSet<UITouch *> *)touches withEvent:(UIEvent *)event {
+    NSLog(@"[AndroidNav] touchesBegan on bar (%lu touches)", (unsigned long)touches.count);
+    [super touchesBegan:touches withEvent:event];
+}
 
 - (void)layoutSubviews {
     [super layoutSubviews];
@@ -217,40 +254,74 @@ static BOOL an_goBack(void) {
 
 #pragma mark - Attach logic
 
-static UIWindow *an_springBoardMainWindow(void) {
-    UIApplication *app = [UIApplication sharedApplication];
-    if (!app) return nil;
-    UIWindow *best = nil;
-    CGFloat bestArea = 0;
-    for (UIWindow *w in [app windows]) {
-        if (!w || w.hidden) continue;
-        CGRect f = w.bounds;
-        CGFloat area = f.size.width * f.size.height;
-        if (area > bestArea) { bestArea = area; best = w; }
-    }
-    return best;
-}
-
-static UIColor *an_barColor(void) {
-    return [UIColor colorWithRed:0.85 green:0.1 blue:0.1 alpha:0.85];
-}
-
 static void an_attachBar(void) {
-    if (gNavBar && gNavBar.superview) return;
     if (![NSThread isMainThread]) return;
-    UIWindow *win = an_springBoardMainWindow();
-    if (!win) return;
+    if (gNavWindow && gNavBar.superview == gNavWindow) return;
+
+    CGRect screen = [[UIScreen mainScreen] bounds];
+
+    if (!gNavWindow) {
+        // iOS 13+: attach to the foreground-active window scene so touches work
+        UIWindowScene *scene = nil;
+        for (UIScene *sc in [[UIApplication sharedApplication] connectedScenes]) {
+            if ([sc isKindOfClass:[UIWindowScene class]] &&
+                sc.activationState == UISceneActivationStateForegroundActive) {
+                scene = (UIWindowScene *)sc; break;
+            }
+        }
+        if (!scene) {
+            for (UIScene *sc in [[UIApplication sharedApplication] connectedScenes]) {
+                if ([sc isKindOfClass:[UIWindowScene class]]) { scene = (UIWindowScene *)sc; break; }
+            }
+        }
+        if (scene) {
+            if (@available(iOS 13.0, *)) {
+                gNavWindow = [[UIWindow alloc] initWithWindowScene:scene];
+                gNavWindow.frame = screen;
+            }
+        }
+        if (!gNavWindow) gNavWindow = [[UIWindow alloc] initWithFrame:screen];
+        // Above status bar / alerts, below system alerts
+        gNavWindow.windowLevel = UIWindowLevelStatusBar + 100.0;
+        gNavWindow.backgroundColor = [UIColor clearColor];
+        gNavWindow.hidden = NO;
+        gNavWindow.userInteractionEnabled = YES;
+
+        UIViewController *vc = [[UIViewController alloc] init];
+        vc.view.backgroundColor = [UIColor clearColor];
+        vc.view.userInteractionEnabled = YES;
+        gNavWindow.rootViewController = vc;
+    }
+
     if (!gNavBar) {
-        CGRect screen = [[UIScreen mainScreen] bounds];
         CGRect frame = CGRectMake(0, screen.size.height - gBarHeight, screen.size.width, gBarHeight);
         gNavBar = [[ANavBarView alloc] initWithFrame:frame];
     }
-    gNavBar.frame = CGRectMake(0, win.bounds.size.height - gBarHeight, win.bounds.size.width, gBarHeight);
+
+    UIViewController *vc = gNavWindow.rootViewController;
+    gNavBar.frame = CGRectMake(0, vc.view.bounds.size.height - gBarHeight,
+                               vc.view.bounds.size.width, gBarHeight);
     gNavBar.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleTopMargin;
-    [win addSubview:gNavBar];
-    [win bringSubviewToFront:gNavBar];
-    gNavBar.hidden = NO;
-    NSLog(@"[AndroidNav] bar attached to window %@", win);
+
+    if (gNavBar.superview != vc.view) {
+        [gNavBar removeFromSuperview];
+        [vc.view addSubview:gNavBar];
+    }
+
+    gNavWindow.hidden = NO;
+    [gNavWindow makeKeyAndVisible];
+    // keep key window sane: makeKeyAndVisible steals key status; restore after
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.15 * NSEC_PER_SEC)),
+                   dispatch_get_main_queue(), ^{
+        UIWindow *best = nil; CGFloat bestArea = 0;
+        for (UIWindow *w in [[UIApplication sharedApplication] windows]) {
+            if (w == gNavWindow) continue;
+            CGFloat a = w.bounds.size.width * w.bounds.size.height;
+            if (a > bestArea) { bestArea = a; best = w; }
+        }
+        if (best) [best makeKeyWindow];
+    });
+    NSLog(@"[AndroidNav] bar attached as its own window (level=%.0f)", gNavWindow.windowLevel);
 }
 
 #pragma mark - Hook
