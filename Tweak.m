@@ -90,6 +90,7 @@ static void an_post_key(uint32_t usage) {
 static BOOL an_goHome(void) {
     // 1) Hardware Home key via IOHID (most reliable)
     an_post_key(HID_USAGE_HOME);
+    if (s_sendEvent) return YES;
 
     // 2) Private API fallbacks
     id uic = an_call_class("SBUIController", "sharedInstance");
@@ -105,6 +106,7 @@ static BOOL an_goHome(void) {
 static BOOL an_openRecents(void) {
     // 1) Two rapid Home presses = app switcher gesture
     an_post_key(HID_USAGE_HOME);
+    if (s_sendEvent) return YES;
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.18 * NSEC_PER_SEC)),
                    dispatch_get_main_queue(), ^{ an_post_key(HID_USAGE_HOME); });
 
@@ -199,9 +201,26 @@ static BOOL an_goBack(void) {
         btn.tag = i;
         // Fire on touch-down for immediate response (Android-like)
         SEL sel = i == 0 ? @selector(an_backTapped:) : (i == 1 ? @selector(an_homeTapped:) : @selector(an_recentsTapped:));
-        [btn addTarget:self action:sel forControlEvents:UIControlEventTouchDown];
+        [btn addTarget:self action:sel forControlEvents:UIControlEventTouchUpInside];
         [self addSubview:btn];
     }
+    // small status label at the far right to show action results on screen
+    UILabel *lbl = [[UILabel alloc] initWithFrame:CGRectMake(w - 110, 2, 108, h - 4)];
+    lbl.tag = 999;
+    lbl.font = [UIFont systemFontOfSize:11 weight:UIFontWeightMedium];
+    lbl.textColor = [UIColor yellowColor];
+    lbl.textAlignment = NSTextAlignmentRight;
+    lbl.backgroundColor = [UIColor clearColor];
+    lbl.userInteractionEnabled = NO;
+    [self addSubview:lbl];
+}
+
+- (void)an_status:(NSString *)msg {
+    UILabel *lbl = [self viewWithTag:999];
+    if (!lbl) return;
+    lbl.text = msg;
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(3 * NSEC_PER_SEC)),
+                   dispatch_get_main_queue(), ^{ lbl.text = @""; });
 }
 
 - (void)an_flash:(UIButton *)b color:(UIColor *)c {
@@ -213,17 +232,23 @@ static BOOL an_goBack(void) {
 
 - (void)an_backTapped:(UIButton *)b {
     [self an_flash:b color:[UIColor colorWithWhite:1 alpha:0.6]];
-    an_goBack();
+    NSString *r = an_goBack() ? @"back OK" : @"back FAIL";
+    [self an_status:r];
+    NSLog(@"[AndroidNav] TAP %@", r);
 }
 
 - (void)an_homeTapped:(UIButton *)b {
     [self an_flash:b color:[UIColor colorWithWhite:1 alpha:0.6]];
-    an_goHome();
+    NSString *r = an_goHome() ? @"home OK" : @"home FAIL";
+    [self an_status:r];
+    NSLog(@"[AndroidNav] TAP %@", r);
 }
 
 - (void)an_recentsTapped:(UIButton *)b {
     [self an_flash:b color:[UIColor colorWithWhite:1 alpha:0.6]];
-    an_openRecents();
+    NSString *r = an_openRecents() ? @"recents OK" : @"recents FAIL";
+    [self an_status:r];
+    NSLog(@"[AndroidNav] TAP %@", r);
 }
 
 - (void)layoutSubviews {
