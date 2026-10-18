@@ -360,6 +360,25 @@ static BOOL an_goBack(void) {
     NSString *sw = an_scan_classes(@[@"Switcher", @"HomeButton", @"HomeHardware"]);
     NSLog(@"[AndroidNav] CLASSES: %@", sw);
 
+    // Show full result in an on-screen panel (sandbox blocks file writes)
+    UIView *panel = [[UIView alloc] initWithFrame:CGRectMake(0, 120, self.window.bounds.size.width, 420)];
+    panel.backgroundColor = [UIColor colorWithWhite:0 alpha:0.92];
+    panel.layer.cornerRadius = 10;
+    panel.tag = 4242;
+    [self.window addSubview:panel];
+
+    UITextView *tv = [[UITextView alloc] initWithFrame:CGRectMake(8, 8, panel.bounds.size.width - 16, panel.bounds.size.height - 16)];
+    tv.backgroundColor = [UIColor clearColor];
+    tv.textColor = [UIColor greenColor];
+    tv.font = [UIFont fontWithName:@"Menlo" size:11];
+    tv.editable = NO;
+    tv.text = [NSString stringWithFormat:@"=== SWITCHER/HOME CLASSES ===\n%@\n\n=== SBUIController ===\n%@\n\n=== SBMainSwitcherViewController ===\n%@\n\n(双击面板关闭)",
+               sw, m1, m2];
+    [panel addSubview:tv];
+
+    UITapGestureRecognizer *tap = [[UITapGestureRecognizer alloc] initWithTarget:self action:@selector(an_closePanel:)];
+    [panel addGestureRecognizer:tap];
+
     NSString *m1 = an_scan_methods("SBUIController", @[@"ome", @"witcher"]);
     NSString *m2 = an_scan_methods("SBMainSwitcherViewController", @[@"witch"]);
     NSString *msg = [NSString stringWithFormat:@"n=%d | %@", an_count_classes(), sw];
@@ -373,6 +392,10 @@ static BOOL an_goBack(void) {
 
     [self an_status:msg];
     NSLog(@"[AndroidNav] %@", dump);
+}
+
+- (void)an_closePanel:(UITapGestureRecognizer *)g {
+    [[g view] removeFromSuperview];
 }
 
 - (void)layoutSubviews {
