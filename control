@@ -1,7 +1,7 @@
 Package: com.minis.androidnav
 Name: AndroidNav
 Depends: mobilesubstrate (>= 0.9.5000), firmware (>= 15.0)
-Version: 0.6.5
+Version: 0.6.6
 Architecture: iphoneos-arm64
 Description: Android-style virtual navigation bar for iOS SpringBoard
 Maintainer: minis
